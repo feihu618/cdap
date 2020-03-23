@@ -2720,6 +2720,15 @@
   </property>
 
   <property>
+    <name>app.program.runtime.monitor.server.ssl.enabled</name>
+    <value>${ssl.internal.enabled}</value>
+    <description>
+      Enable usage of SSL for the runtime monitor server. By default is disabled.
+      This is because traffic is already encrypted through the SSH tunnel.
+    </description>
+  </property>
+
+  <property>
     <name>app.program.runtime.monitor.server.info.file</name>
     <value>runtime.monitor.server.info</value>
     <description>
