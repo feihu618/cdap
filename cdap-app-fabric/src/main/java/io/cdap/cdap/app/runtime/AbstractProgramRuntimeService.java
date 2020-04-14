@@ -28,6 +28,7 @@ import com.google.common.collect.Sets;
 import com.google.common.collect.Table;
 import com.google.common.io.Closeables;
 import com.google.common.util.concurrent.AbstractIdleService;
+import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import com.google.inject.Inject;
 import io.cdap.cdap.api.app.ApplicationSpecification;
 import io.cdap.cdap.api.common.RuntimeArguments;
@@ -83,6 +84,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
@@ -106,6 +110,7 @@ public abstract class AbstractProgramRuntimeService extends AbstractIdleService 
   private final ArtifactRepository noAuthArtifactRepository;
   private ProgramRunnerFactory remoteProgramRunnerFactory;
   private TwillRunnerService remoteTwillRunnerService;
+  private ExecutorService executor;
 
   protected AbstractProgramRuntimeService(CConfiguration cConf,
                                           ProgramRunnerFactory programRunnerFactory,
@@ -148,30 +153,33 @@ public abstract class AbstractProgramRuntimeService extends AbstractIdleService 
 
 
     File tempDir = createTempDirectory(programId, runId);
-    Runnable cleanUpTask = createCleanupTask(tempDir, runner);
-    try {
-      // Get the artifact details and save it into the program options.
-      ArtifactId artifactId = programDescriptor.getArtifactId();
-      ArtifactDetail artifactDetail = getArtifactDetail(artifactId);
-      ProgramOptions runtimeProgramOptions = updateProgramOptions(artifactId, programId, options, runId);
+    AtomicReference<Runnable> cleanUpTaskRef = new AtomicReference<>(createCleanupTask(tempDir, runner));
+    DelayedProgramController controller = new DelayedProgramController(programId.run(runId));
+    RuntimeInfo runtimeInfo = createRuntimeInfo(controller, programId, () -> cleanUpTaskRef.get().run());
+    monitorProgram(runtimeInfo, () -> cleanUpTaskRef.get().run());
 
-      // Take a snapshot of all the plugin artifacts used by the program
-      ProgramOptions optionsWithPlugins = createPluginSnapshot(runtimeProgramOptions, programId, tempDir,
-                                                               programDescriptor.getApplicationSpecification());
+    executor.execute(() -> {
+      try {
+        // Get the artifact details and save it into the program options.
+        ArtifactId artifactId = programDescriptor.getArtifactId();
+        ArtifactDetail artifactDetail = getArtifactDetail(artifactId);
+        ProgramOptions runtimeProgramOptions = updateProgramOptions(artifactId, programId, options, runId);
 
-      // Create and run the program
-      Program executableProgram = createProgram(cConf, runner, programDescriptor, artifactDetail, tempDir);
-      cleanUpTask = createCleanupTask(cleanUpTask, executableProgram);
+        // Take a snapshot of all the plugin artifacts used by the program
+        ProgramOptions optionsWithPlugins = createPluginSnapshot(runtimeProgramOptions, programId, tempDir,
+                                                                 programDescriptor.getApplicationSpecification());
 
-      RuntimeInfo runtimeInfo = createRuntimeInfo(runner.run(executableProgram, optionsWithPlugins), programId,
-                                                  cleanUpTask);
-      monitorProgram(runtimeInfo, cleanUpTask);
-      return runtimeInfo;
-    } catch (Exception e) {
-      cleanUpTask.run();
-      LOG.error("Exception while trying to run program", e);
-      throw Throwables.propagate(e);
-    }
+        // Create and run the program
+        Program executableProgram = createProgram(cConf, runner, programDescriptor, artifactDetail, tempDir);
+        cleanUpTaskRef.set(createCleanupTask(cleanUpTaskRef.get(), executableProgram));
+
+        controller.setProgramController(runner.run(executableProgram, optionsWithPlugins));
+      } catch (Exception e) {
+        controller.failed(e);
+        LOG.error("Exception while trying to run program", e);
+      }
+    });
+    return runtimeInfo;
   }
 
   @Override
@@ -443,12 +451,14 @@ public abstract class AbstractProgramRuntimeService extends AbstractIdleService 
 
   @Override
   protected void startUp() throws Exception {
-    // No-op
+    executor = Executors.newCachedThreadPool(new ThreadFactoryBuilder().setNameFormat("program-start-%d").build());
   }
 
   @Override
   protected void shutDown() throws Exception {
-    // No-op
+    if (executor != null) {
+      executor.shutdown();
+    }
   }
 
   @VisibleForTesting

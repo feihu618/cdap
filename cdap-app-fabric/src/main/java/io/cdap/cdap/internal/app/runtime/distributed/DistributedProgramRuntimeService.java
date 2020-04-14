@@ -269,9 +269,4 @@ public final class DistributedProgramRuntimeService extends AbstractProgramRunti
 
     return super.getLiveInfo(program);
   }
-
-  @Override
-  protected void startUp() {
-    LOG.debug("started distributed program runtime service");
-  }
 }

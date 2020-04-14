@@ -70,6 +70,7 @@ public final class InMemoryProgramRuntimeService extends AbstractProgramRuntimeS
 
   @Override
   protected void shutDown() throws Exception {
+    super.shutDown();
     stopAllPrograms();
   }
 
